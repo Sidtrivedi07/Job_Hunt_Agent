@@ -1,0 +1,7 @@
+{
+  "target_roles": ["Software Engineer", "SWE-1", "Junior Developer", "AI Engineer", "Backend Developer", "GEN AI Engineer"],
+  "skills": ["TypeScript", "Node.js", "Python", "React", "AWS", "REST APIs"],
+  "location": "Ontario, Canada",
+  "remote_ok": true,
+  "salary_min_cad": 70000
+}
