@@ -3,3 +3,4 @@ venv/
 .env
 scraper/results.json
 dist/
+db/jobs.db
