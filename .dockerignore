@@ -1,0 +1,7 @@
+node_modules/
+venv/
+.env
+dist/
+db/jobs.db
+__pycache__/
+*.pyc
