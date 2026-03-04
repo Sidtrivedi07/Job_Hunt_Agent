@@ -62,9 +62,29 @@ try:
             "site": str(job.get("site", ""))
         })
 
+        # Dedupe within this run by ID
+        # Dedupe within this run by BOTH id AND title+company
+    seen_ids = set()
+    seen_title_company = set()
+    deduped = []
+
+    for job in output:
+        title_company_key = f"{job['title'].lower()}_{job['company'].lower()}"
+        
+        if job["id"] in seen_ids or title_company_key in seen_title_company:
+            continue
+            
+        seen_ids.add(job["id"])
+        seen_title_company.add(title_company_key)
+        deduped.append(job)
+
+    print(f"🔁 Deduped: {len(output) - len(deduped)} duplicates removed within this run")
+
     # Overwrite file each run (not append)
     with open("scraper/results.json", "w") as f:
-        json.dump(output, f, indent=2)
+        json.dump(deduped, f, indent=2)
+
+    print(f"💾 Saved {len(deduped)} unique jobs to scraper/results.json")
 
     print(f"✅ Kept: {len(output)} relevant jobs")
     print(f"🚫 Skipped: {skipped} irrelevant/senior roles")
