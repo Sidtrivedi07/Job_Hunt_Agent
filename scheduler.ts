@@ -3,15 +3,17 @@ import * as cron from "node-cron";
 import * as fs from "fs";
 import * as path from "path";
 import { config } from "dotenv";
-import { processJobs, logRun, Job } from "./db/repository";
+import { initDB, processJobs, logRun, closeDB, Job } from "./db/repository";
 
 config();
+
+
 
 async function runPipeline(): Promise<void> {
   console.log(`\n⏰ [${new Date().toLocaleTimeString()}] Running pipeline...`);
 
   try {
-    // Step 1: Scrape raw jobs
+    // Step 1: Scrape
     console.log("🔍 Scraping jobs...");
     execSync("python scraper/scrape.py", { stdio: "inherit" });
 
@@ -20,13 +22,12 @@ async function runPipeline(): Promise<void> {
     const rawJobs: Job[] = JSON.parse(fs.readFileSync(filePath, "utf-8"));
     console.log(`📦 Scraped: ${rawJobs.length} raw jobs`);
 
-    // Step 3: Repository handles everything —
-    // dedup within run + filter DB + save new jobs
-    const newJobs = processJobs(rawJobs);
+    // Step 3: Repository handles dedup + save
+    const newJobs = await processJobs(rawJobs);
 
     if (newJobs.length === 0) {
       console.log("📭 No new jobs this run — nothing sent to Discord");
-      logRun({ jobs_found: rawJobs.length, jobs_new: 0, jobs_sent: 0 });
+      await logRun({ jobs_found: rawJobs.length, jobs_new: 0, jobs_sent: 0 });
       return;
     }
 
@@ -38,7 +39,7 @@ async function runPipeline(): Promise<void> {
     execSync("npx ts-node notifier/discord.ts", { stdio: "inherit" });
 
     // Step 6: Log this run
-    logRun({
+    await logRun({
       jobs_found: rawJobs.length,
       jobs_new: newJobs.length,
       jobs_sent: newJobs.length,
@@ -52,8 +53,19 @@ async function runPipeline(): Promise<void> {
   }
 }
 
-console.log("🤖 Job Hunt Agent started — running every 2 hours");
-console.log("⏰ First run starting now...\n");
+async function main(): Promise<void> {
+  console.log("🤖 Job Hunt Agent started — running every 2 hours");
 
-runPipeline();
-cron.schedule("0 */2 * * *", runPipeline);
+  // Initialize DB tables
+  await initDB();
+
+  console.log("⏰ First run starting now...\n");
+
+  // Run immediately
+  await runPipeline();
+
+  // Then every 2 hours
+  cron.schedule("0 */2 * * *", runPipeline);
+}
+
+main().catch(console.error);

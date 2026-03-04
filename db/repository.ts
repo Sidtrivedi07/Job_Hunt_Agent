@@ -1,16 +1,6 @@
-import Database from "better-sqlite3";
+import pool from "./connection";
 import * as fs from "fs";
 import * as path from "path";
-
-const DB_PATH = path.join(process.cwd(), "db", "jobs.db");
-const SCHEMA_PATH = path.join(process.cwd(), "db", "schema.sql");
-
-function getDB(): Database.Database {
-  const db = new Database(DB_PATH);
-  const schema = fs.readFileSync(SCHEMA_PATH, "utf-8");
-  db.exec(schema);
-  return db;
-}
 
 export interface Job {
   id: string;
@@ -28,15 +18,36 @@ export interface RunLog {
   jobs_sent: number;
 }
 
-// Single function that does everything:
-// 1. Dedupe within the batch (same job appearing twice in one scrape)
-// 2. Filter out jobs already in DB (seen in previous runs)
-// 3. Save new unique jobs to DB
-// 4. Return only the new unique jobs
-export function processJobs(jobs: Job[]): Job[] {
-  const db = getDB();
+// Create tables if they don't exist
+export async function initDB(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      company TEXT NOT NULL,
+      location TEXT,
+      url TEXT,
+      date_posted TEXT,
+      site TEXT,
+      seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
 
-  // Step 1: Dedupe within this batch by ID
+    CREATE TABLE IF NOT EXISTS runs (
+      id SERIAL PRIMARY KEY,
+      ran_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      jobs_found INTEGER,
+      jobs_new INTEGER,
+      jobs_sent INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_title_company 
+    ON jobs(title, company);
+  `);
+  console.log("✅ DB initialized");
+}
+
+export async function processJobs(jobs: Job[]): Promise<Job[]> {
+  // Step 1: Dedupe within this batch
   const seen = new Set<string>();
   const uniqueBatch: Job[] = [];
   for (const job of jobs) {
@@ -51,32 +62,28 @@ export function processJobs(jobs: Job[]): Job[] {
     console.log(`🔁 Removed ${withinRunDupes} duplicates within this scrape`);
   }
 
-  
   // Step 2: Filter out jobs already in DB
-  // Check BOTH job ID and title+company combo
   const newJobs: Job[] = [];
   let crossPlatformDupes = 0;
 
   for (const job of uniqueBatch) {
     // Check 1: Same ID already in DB?
-    const existingById = db
-      .prepare("SELECT id FROM jobs WHERE id = ?")
-      .get(job.id);
+    const { rows: byId } = await pool.query(
+      "SELECT id FROM jobs WHERE id = $1",
+      [job.id]
+    );
+    if (byId.length > 0) continue;
 
-    if (existingById) continue;
+    // Check 2: Same title+company (cross-platform dupe)?
+    const { rows: byTitleCompany } = await pool.query(
+      `SELECT id, site FROM jobs 
+       WHERE LOWER(title) = LOWER($1) 
+       AND LOWER(company) = LOWER($2)`,
+      [job.title, job.company]
+    );
 
-    // Check 2: Same title+company already in DB (cross-platform dupe)?
-    const existingByTitleCompany = db
-      .prepare(`
-        SELECT id, site FROM jobs 
-        WHERE LOWER(title) = LOWER(?) 
-        AND LOWER(company) = LOWER(?)
-      `)
-      .get(job.title, job.company);
-
-    if (existingByTitleCompany) {
-      const dupe = existingByTitleCompany as { id: string; site: string };
-      console.log(`🔀 Cross-platform dupe: "${job.title} @ ${job.company}" (${job.site} = ${dupe.site})`);
+    if (byTitleCompany.length > 0) {
+      console.log(`🔀 Cross-platform dupe: "${job.title} @ ${job.company}"`);
       crossPlatformDupes++;
       continue;
     }
@@ -90,39 +97,28 @@ export function processJobs(jobs: Job[]): Job[] {
 
   // Step 3: Save new jobs to DB
   if (newJobs.length > 0) {
-    const insert = db.prepare(`
-      INSERT OR IGNORE INTO jobs (id, title, company, location, url, date_posted, site)
-      VALUES (@id, @title, @company, @location, @url, @date_posted, @site)
-    `);
-
-    const insertMany = db.transaction((jobs: Job[]) => {
-      for (const job of jobs) insert.run(job);
-    });
-
-    insertMany(newJobs);
+    for (const job of newJobs) {
+      await pool.query(
+        `INSERT INTO jobs (id, title, company, location, url, date_posted, site)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (id) DO NOTHING`,
+        [job.id, job.title, job.company, job.location, job.url, job.date_posted, job.site]
+      );
+    }
     console.log(`💾 Saved ${newJobs.length} new jobs to DB`);
   }
 
-  db.close();
-
-  // Step 4: Return only new unique jobs
   return newJobs;
 }
 
-export function logRun(log: RunLog): void {
-  const db = getDB();
-  db.prepare(`
-    INSERT INTO runs (jobs_found, jobs_new, jobs_sent)
-    VALUES (@jobs_found, @jobs_new, @jobs_sent)
-  `).run(log);
-  db.close();
+export async function logRun(log: RunLog): Promise<void> {
+  await pool.query(
+    `INSERT INTO runs (jobs_found, jobs_new, jobs_sent)
+     VALUES ($1, $2, $3)`,
+    [log.jobs_found, log.jobs_new, log.jobs_sent]
+  );
 }
 
-export function getRunHistory(): RunLog[] {
-  const db = getDB();
-  const rows = db
-    .prepare("SELECT * FROM runs ORDER BY ran_at DESC LIMIT 10")
-    .all();
-  db.close();
-  return rows as RunLog[];
+export async function closeDB(): Promise<void> {
+  await pool.end();
 }
